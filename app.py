@@ -111,6 +111,14 @@ except Exception as e:
 
 problems = db.schema_problems(engine)
 if problems:
+    # La conexión queda en caché entre despliegues: si el código nuevo trae
+    # columnas nuevas, se agregan acá sin tener que reiniciar la app.
+    try:
+        db.ensure_schema(engine)
+        problems = db.schema_problems(engine)
+    except Exception as ex:
+        problems.append(f"No se pudo actualizar la tabla automáticamente: {ex}")
+if problems:
     st.error("La tabla `tasks` tiene el esquema de la versión anterior y hay que migrarla:")
     for p in problems:
         st.markdown(f"- {p}")

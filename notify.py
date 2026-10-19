@@ -33,7 +33,7 @@ def build_message(cfg: Mapping, task: Mapping, app_url: str = "") -> EmailMessag
     texto = [
         "Hola,",
         "",
-        "Se te asignó como responsable de VALIDACIÓN de una tarea en el Tablero de Seguimiento:",
+        "Tenés una tarea pendiente de ejecutar en el Tablero de Seguimiento, donde figurás como responsable de validación:",
         "",
         *[f"- {k}: {v}" for k, v in filas],
     ]
@@ -63,14 +63,14 @@ def build_message(cfg: Mapping, task: Mapping, app_url: str = "") -> EmailMessag
     html = f"""\
 <div style="font-family:Arial,sans-serif;font-size:14px;color:#222">
   <p>Hola,</p>
-  <p>Se te asignó como <b>responsable de validación</b> de una tarea en el Tablero de Seguimiento:</p>
+  <p>Tenés una <b>tarea pendiente de ejecutar</b> en el Tablero de Seguimiento, donde figurás como <b>responsable de validación</b>:</p>
   <table>{filas_html}</table>
   <p style="margin-top:16px">{botones}</p>
   <p style="color:#888;font-size:12px">Este es un mensaje automático.</p>
 </div>"""
 
     msg = EmailMessage()
-    msg["Subject"] = f"[Tablero] Validación asignada: {task['tarea']}"
+    msg["Subject"] = f"[Tablero] Tenés una tarea pendiente: {task['tarea']}"
     sender = cfg.get("from_email") or cfg["user"]
     name = cfg.get("from_name") or "Tablero de Seguimiento"
     msg["From"] = f"{name} <{sender}>"
