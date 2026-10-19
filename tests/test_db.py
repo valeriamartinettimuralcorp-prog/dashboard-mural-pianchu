@@ -85,7 +85,11 @@ def test_apply_changes_is_atomic(engine):
 
 
 def test_normalize_url():
-    assert db.normalize_url("postgres://u:p@h/db").startswith("postgresql://")
+    want = "postgresql+psycopg://u:p@h/db"
+    assert db.normalize_url("postgres://u:p@h/db") == want
+    assert db.normalize_url("postgresql://u:p@h/db") == want
+    assert db.normalize_url("postgresql+psycopg2://u:p@h/db") == want
+    assert db.normalize_url("sqlite:///:memory:") == "sqlite:///:memory:"
 
 
 def test_no_schema_problems_on_fresh_table(engine):

@@ -58,15 +58,27 @@ tasks = Table(
 # Conexión y esquema
 # --------------------------------------------------------------------------
 def normalize_url(url: str) -> str:
-    """Supabase entrega `postgres://...`; SQLAlchemy 2 exige `postgresql://`."""
+    """Deja la URL lista para SQLAlchemy usando el driver `psycopg` (v3).
+
+    Acepta `postgres://`, `postgresql://` o `postgresql+<driver>://` (lo que
+    entregue Supabase o se haya pegado en los secretos) y las unifica.
+    """
     url = url.strip()
-    if url.startswith("postgres://"):
-        url = "postgresql://" + url[len("postgres://"):]
-    return url
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    if url.startswith("postgresql+"):
+        return "postgresql+psycopg://" + url.split("://", 1)[1]
+    return url  # sqlite u otros (tests)
 
 
 def make_engine(url: str) -> Engine:
-    return create_engine(normalize_url(url), pool_pre_ping=True, pool_recycle=300)
+    url = normalize_url(url)
+    kwargs = {"pool_pre_ping": True, "pool_recycle": 300}
+    if url.startswith("postgresql+psycopg://"):
+        # El pooler de Supabase (puerto 6543) no admite prepared statements.
+        kwargs["connect_args"] = {"prepare_threshold": None}
+    return create_engine(url, **kwargs)
 
 
 def ensure_schema(engine: Engine) -> None:
