@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 import db
+import io_tareas
 import notify
 
 st.set_page_config(page_title="Tablero de Seguimiento", page_icon="📋", layout="wide")
@@ -296,7 +297,9 @@ if ocultar_completadas:
 if len(fdf) != len(df):
     st.caption(f"Mostrando {len(fdf)} de {len(df)} tareas (filtros activos).")
 
-tab_kanban, tab_tabla, tab_resumen = st.tabs(["📌 Tablero Kanban", "📊 Tabla Editable", "⚙️ Resumen"])
+tab_kanban, tab_tabla, tab_resumen, tab_io = st.tabs(
+    ["📌 Tablero Kanban", "📊 Tabla Editable", "⚙️ Resumen", "📥 Importar / Exportar"]
+)
 
 # --------------------------------------------------------------------------
 # Kanban
@@ -434,10 +437,135 @@ with tab_resumen:
             else:
                 st.bar_chart(por_resp)
 
-        st.markdown("---")
-        st.download_button(
-            "⬇️ Descargar CSV",
-            data=df[db.COLUMNAS].to_csv(index=False).encode("utf-8-sig"),
-            file_name="tareas_seguimiento.csv",
-            mime="text/csv",
-        )
+
+# --------------------------------------------------------------------------
+# Importar / Exportar
+# --------------------------------------------------------------------------
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+with tab_io:
+    st.subheader("1. Plantilla y exportación")
+    st.caption(
+        "La plantilla y la exportación usan el mismo formato: un archivo exportado "
+        "se puede editar y volver a importar."
+    )
+    e1, e2, e3 = st.columns(3)
+    e1.download_button(
+        "📄 Descargar plantilla vacía (Excel)",
+        data=io_tareas.plantilla_xlsx(),
+        file_name="plantilla_tareas.xlsx",
+        mime=XLSX,
+        width="stretch",
+    )
+    e2.download_button(
+        f"⬇️ Exportar {len(fdf)} tareas (Excel)",
+        data=io_tareas.exportar_xlsx(fdf),
+        file_name=f"tareas_{hoy:%Y%m%d}.xlsx",
+        mime=XLSX,
+        width="stretch",
+        disabled=fdf.empty,
+        help="Exporta las tareas visibles (respeta los filtros de la barra lateral).",
+    )
+    e3.download_button(
+        f"⬇️ Exportar {len(fdf)} tareas (CSV)",
+        data=io_tareas.exportar_csv(fdf),
+        file_name=f"tareas_{hoy:%Y%m%d}.csv",
+        mime="text/csv",
+        width="stretch",
+        disabled=fdf.empty,
+    )
+
+    st.markdown("---")
+    st.subheader("2. Importar tareas")
+    st.caption(
+        "Subí la plantilla completa o un Excel/CSV de otro tablero. Se reconocen encabezados "
+        "parecidos (p. ej. «Responsable», «Vencimiento», «Status») y estados como «en curso», "
+        "«a validar» o «cumplido». Nada se guarda hasta que confirmes."
+    )
+    up_key = f"import_file_{st.session_state.get('import_n', 0)}"
+    archivo = st.file_uploader("Archivo (.xlsx o .csv)", type=["xlsx", "xlsm", "csv"], key=up_key)
+
+    if archivo is not None:
+        try:
+            prep = io_tareas.preparar(io_tareas.leer_archivo(archivo.name, archivo.getvalue()))
+        except Exception as ex:
+            st.error(f"No se pudo leer el archivo: {ex}")
+            prep = None
+
+        if prep:
+            validas, errores = prep["validas"], prep["errores"]
+            reconocidas = ", ".join(
+                f"«{col}» → {io_tareas.ENCABEZADOS[c]}" for col, c in prep["mapa"].items()
+            )
+            st.caption(f"Columnas reconocidas: {reconocidas}")
+            if prep["ignoradas"]:
+                st.caption(f"Columnas ignoradas: {', '.join(prep['ignoradas'])}")
+
+            existentes = {t.strip().lower() for t in df["tarea"]}
+            hay_ids = any(v.get("id") is not None for v in validas)
+
+            o1, o2, o3 = st.columns(3)
+            actualizar = o1.checkbox(
+                "Actualizar las que tengan ID existente",
+                value=False,
+                disabled=not hay_ids,
+                help="Usalo solo con archivos exportados de ESTE tablero. "
+                "Si no, todas se cargan como tareas nuevas.",
+            )
+            omitir_dup = o2.checkbox(
+                "Omitir tareas con nombre ya existente",
+                value=True,
+                help="Evita duplicar tareas si importás dos veces el mismo archivo.",
+            )
+            avisar = o3.checkbox("Enviar mail a los validadores de las nuevas", value=True)
+
+            ids_db = set(df["id"].astype(int))
+            a_cargar, duplicadas = [], 0
+            for v in validas:
+                es_update = actualizar and v.get("id") in ids_db
+                if not es_update and omitir_dup and v["tarea"].strip().lower() in existentes:
+                    duplicadas += 1
+                    continue
+                a_cargar.append(v)
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Listas para importar", len(a_cargar))
+            m2.metric("Con errores", len(errores))
+            m3.metric("Omitidas por duplicadas", duplicadas)
+
+            if errores:
+                st.warning("Estas filas no se van a importar. Corregilas en el archivo y volvé a subirlo:")
+                st.dataframe(pd.DataFrame(errores), hide_index=True, width="stretch")
+
+            if a_cargar:
+                vista_imp = pd.DataFrame(a_cargar)
+                vista_imp.insert(0, "color", vista_imp["estado"].map(lambda e: COLORES[e][2]))
+                st.dataframe(
+                    vista_imp[["color", "_fila", "tarea", "estado", "prioridad", "responsable_ejecucion",
+                               "responsable_validacion", "fecha_limite", "link_formulario"]],
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "color": st.column_config.TextColumn("", width="small"),
+                        "_fila": st.column_config.NumberColumn("Fila", width="small"),
+                        "tarea": "Tarea",
+                        "estado": "Estado",
+                        "prioridad": "Prioridad",
+                        "responsable_ejecucion": "Resp. ejecución",
+                        "responsable_validacion": "Resp. validación",
+                        "fecha_limite": st.column_config.DateColumn("Fecha límite", format="DD/MM/YYYY"),
+                        "link_formulario": st.column_config.LinkColumn("Formulario"),
+                    },
+                )
+                if st.button(f"📥 Importar {len(a_cargar)} tareas", type="primary"):
+                    res = run(
+                        lambda: db.import_tasks(engine, a_cargar, actualizar_por_id=actualizar),
+                        lambda r: f"Importación lista: {r['insertadas']} nuevas, {r['actualizadas']} actualizadas.",
+                    )
+                    if res:
+                        if avisar:
+                            notificar(res["nuevas"])
+                        st.session_state["import_n"] = st.session_state.get("import_n", 0) + 1
+                        st.rerun()
+            elif not errores:
+                st.info("No hay tareas nuevas para importar en este archivo.")

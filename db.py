@@ -308,6 +308,33 @@ def apply_changes(
     }
 
 
+def import_tasks(engine: Engine, filas: list[dict], actualizar_por_id: bool = False) -> dict:
+    """Carga filas ya validadas (ver io_tareas.preparar) en una sola transacción.
+
+    Con `actualizar_por_id`, las filas cuyo `id` existe se actualizan; el resto
+    se inserta como tarea nueva (el `id` del archivo se ignora).
+    """
+    campos = [c for c in COLUMNAS if c != "id"]
+    nuevas, actualizadas = [], 0
+    with engine.begin() as conn:
+        existentes = set()
+        if actualizar_por_id:
+            existentes = {r[0] for r in conn.execute(select(tasks.c.id))}
+        for f in filas:
+            values = _validate({c: f.get(c) for c in campos})
+            rid = f.get("id")
+            if actualizar_por_id and rid is not None and int(rid) in existentes:
+                conn.execute(
+                    update(tasks).where(tasks.c.id == int(rid))
+                    .values(**values, actualizado_en=datetime.now())
+                )
+                actualizadas += 1
+            else:
+                res = conn.execute(insert(tasks).values(**values))
+                nuevas.append({**values, "id": int(res.inserted_primary_key[0])})
+    return {"insertadas": len(nuevas), "actualizadas": actualizadas, "nuevas": nuevas}
+
+
 def check_connection(engine: Engine) -> None:
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))

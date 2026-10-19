@@ -10,7 +10,8 @@ Tablero de tareas con **Streamlit** y **PostgreSQL (Supabase)**.
 - **Tabla editable**: editar, agregar y borrar filas; solo se escriben las diferencias (INSERT/UPDATE/DELETE por `id`), en una transacción.
 - **Kanban**: mover tareas entre estados con los botones ◀ ▶; marca las vencidas.
 - **Filtros**: búsqueda, responsable de ejecución, de validación, prioridad, solo vencidas, ocultar completadas.
-- **Resumen**: métricas, gráficos por estado y responsable, exportación CSV.
+- **Resumen**: métricas y gráficos por estado y responsable.
+- **Importar / Exportar**: plantilla Excel (con listas desplegables e instrucciones), exportación a Excel/CSV en el mismo formato e importación de Excel/CSV de otros tableros con vista previa, detección de errores por fila, omisión de duplicados y aviso por mail a los validadores. Reconoce encabezados y estados equivalentes (p. ej. «Responsable», «Vencimiento», «en curso», «cumplido»).
 - Contraseña de acceso opcional.
 
 ## Puesta en marcha
