@@ -8,11 +8,16 @@ CREATE TABLE IF NOT EXISTS tasks (
     tarea          TEXT        NOT NULL,
     estado         TEXT        NOT NULL DEFAULT 'Pendiente',
     prioridad      TEXT        NOT NULL DEFAULT 'Media',
-    responsable    TEXT        NOT NULL DEFAULT '',
+    responsable_ejecucion  TEXT NOT NULL DEFAULT '',
+    responsable_validacion TEXT NOT NULL DEFAULT '',  -- mail del validador
+    link_formulario        TEXT NOT NULL DEFAULT '',  -- link al formulario de Google
     fecha_limite   DATE,
     creado_en      TIMESTAMP   DEFAULT now(),
     actualizado_en TIMESTAMP   DEFAULT now()
 );
+
+-- Las columnas responsable_ejecucion / responsable_validacion / link_formulario
+-- las agrega la app sola al iniciar (renombra `responsable` si existe).
 
 -- ============ B) Migración de la tabla vieja ============
 -- Ejecutar UNA vez (en el SQL Editor de Supabase) si la app avisa que la tabla

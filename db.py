@@ -5,6 +5,7 @@ con SQLite y usar en producción con PostgreSQL (Supabase).
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Optional
 
@@ -31,7 +32,20 @@ from sqlalchemy.engine import Engine
 
 ESTADOS = ["Pendiente", "En Progreso", "En Revisión", "Completado"]
 PRIORIDADES = ["Baja", "Media", "Alta", "Urgente"]
-COLUMNAS = ["id", "tarea", "estado", "prioridad", "responsable", "fecha_limite"]
+COLUMNAS = [
+    "id",
+    "tarea",
+    "estado",
+    "prioridad",
+    "responsable_ejecucion",
+    "responsable_validacion",
+    "link_formulario",
+    "fecha_limite",
+]
+# Campos de texto opcionales: se guardan como "" en vez de NULL.
+TEXTOS = ["responsable_ejecucion", "responsable_validacion", "link_formulario"]
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 metadata = MetaData()
 
@@ -47,7 +61,9 @@ tasks = Table(
     Column("tarea", Text, nullable=False),
     Column("estado", Text, nullable=False, server_default="Pendiente"),
     Column("prioridad", Text, nullable=False, server_default="Media"),
-    Column("responsable", Text, nullable=False, server_default=""),
+    Column("responsable_ejecucion", Text, nullable=False, server_default=""),
+    Column("responsable_validacion", Text, nullable=False, server_default=""),
+    Column("link_formulario", Text, nullable=False, server_default=""),
     Column("fecha_limite", Date, nullable=True),
     Column("creado_en", DateTime, server_default=func.now()),
     Column("actualizado_en", DateTime, server_default=func.now()),
@@ -82,8 +98,24 @@ def make_engine(url: str) -> Engine:
 
 
 def ensure_schema(engine: Engine) -> None:
-    """Crea la tabla `tasks` si no existe. No toca una tabla existente."""
+    """Crea la tabla si no existe y agrega las columnas nuevas si faltan.
+
+    Los cambios sobre una tabla existente son solo aditivos: renombrar
+    `responsable` -> `responsable_ejecucion` y agregar columnas de texto.
+    """
     metadata.create_all(engine, checkfirst=True)
+    cols = {c["name"] for c in inspect(engine).get_columns("tasks")}
+    stmts = []
+    if "responsable" in cols and "responsable_ejecucion" not in cols:
+        stmts.append("ALTER TABLE tasks RENAME COLUMN responsable TO responsable_ejecucion")
+        cols.add("responsable_ejecucion")
+    for col in TEXTOS:
+        if col not in cols:
+            stmts.append(f"ALTER TABLE tasks ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+    if stmts:
+        with engine.begin() as conn:
+            for s in stmts:
+                conn.execute(text(s))
 
 
 def schema_problems(engine: Engine) -> list[str]:
@@ -115,12 +147,13 @@ def load_tasks(engine: Engine) -> pd.DataFrame:
             select(*[tasks.c[c] for c in COLUMNAS]).order_by(tasks.c.id), conn
         )
     df["fecha_limite"] = pd.to_datetime(df["fecha_limite"]).dt.date
-    df["responsable"] = df["responsable"].fillna("")
+    for c in TEXTOS:
+        df[c] = df[c].fillna("")
     return df
 
 
 # --------------------------------------------------------------------------
-# Escritura
+# Validación
 # --------------------------------------------------------------------------
 def _clean(value):
     """Convierte NaN/NaT/None de pandas en None; el resto queda igual."""
@@ -136,36 +169,67 @@ def _clean(value):
     return value
 
 
-def _validate(tarea, estado, prioridad) -> str:
-    tarea = (tarea or "").strip()
-    if not tarea:
+def normalize_link(link: Optional[str]) -> str:
+    link = (link or "").strip()
+    if link and not re.match(r"^https?://", link, re.I):
+        link = "https://" + link
+    return link
+
+
+def _validate(values: dict) -> dict:
+    """Valida y normaliza los campos de una tarea. Devuelve una copia."""
+    v = dict(values)
+    v["tarea"] = (v.get("tarea") or "").strip()
+    if not v["tarea"]:
         raise ValueError("El nombre de la tarea no puede estar vacío.")
-    if estado not in ESTADOS:
-        raise ValueError(f"Estado inválido: {estado!r}")
-    if prioridad not in PRIORIDADES:
-        raise ValueError(f"Prioridad inválida: {prioridad!r}")
-    return tarea
+    v["estado"] = v.get("estado") or "Pendiente"
+    v["prioridad"] = v.get("prioridad") or "Media"
+    if v["estado"] not in ESTADOS:
+        raise ValueError(f"Estado inválido: {v['estado']!r}")
+    if v["prioridad"] not in PRIORIDADES:
+        raise ValueError(f"Prioridad inválida: {v['prioridad']!r}")
+    for c in TEXTOS:
+        v[c] = (v.get(c) or "").strip()
+    v["responsable_validacion"] = v["responsable_validacion"].lower()
+    if v["responsable_validacion"] and not EMAIL_RE.match(v["responsable_validacion"]):
+        raise ValueError(
+            f"El responsable de validación debe ser un mail válido "
+            f"(tarea «{v['tarea']}»: {v['responsable_validacion']!r})."
+        )
+    v["link_formulario"] = normalize_link(v["link_formulario"])
+    v["fecha_limite"] = _clean(v.get("fecha_limite"))
+    return v
 
 
+# --------------------------------------------------------------------------
+# Escritura
+# --------------------------------------------------------------------------
 def add_task(
     engine: Engine,
     tarea: str,
     estado: str = "Pendiente",
     prioridad: str = "Media",
-    responsable: str = "",
+    responsable_ejecucion: str = "",
     fecha_limite: Optional[date] = None,
-) -> None:
-    tarea = _validate(tarea, estado, prioridad)
+    responsable_validacion: str = "",
+    link_formulario: str = "",
+) -> dict:
+    """Inserta la tarea y la devuelve (con su `id`)."""
+    values = _validate(
+        {
+            "tarea": tarea,
+            "estado": estado,
+            "prioridad": prioridad,
+            "responsable_ejecucion": responsable_ejecucion,
+            "responsable_validacion": responsable_validacion,
+            "link_formulario": link_formulario,
+            "fecha_limite": fecha_limite,
+        }
+    )
     with engine.begin() as conn:
-        conn.execute(
-            insert(tasks).values(
-                tarea=tarea,
-                estado=estado,
-                prioridad=prioridad,
-                responsable=(responsable or "").strip(),
-                fecha_limite=_clean(fecha_limite),
-            )
-        )
+        res = conn.execute(insert(tasks).values(**values))
+        values["id"] = int(res.inserted_primary_key[0])
+    return values
 
 
 def set_estado(engine: Engine, task_id: int, estado: str) -> None:
@@ -181,7 +245,7 @@ def set_estado(engine: Engine, task_id: int, estado: str) -> None:
 
 def apply_changes(
     engine: Engine, original: pd.DataFrame, edited: pd.DataFrame
-) -> dict[str, int]:
+) -> dict:
     """Aplica solo las diferencias entre `original` y `edited`.
 
     - filas sin `id` en `edited`        -> INSERT
@@ -191,23 +255,21 @@ def apply_changes(
     Solo toca los ids presentes en `original`, por lo que sirve también si la
     grilla estaba filtrada. Se valida todo antes de escribir; si algo falla no
     se guarda nada (una sola transacción).
+
+    Devuelve los conteos y, en `nuevas`, las tareas insertadas (con `id`)
+    para poder notificar a los responsables.
     """
     campos = [c for c in COLUMNAS if c != "id"]
     orig = {int(r["id"]): r for _, r in original.iterrows()}
 
     inserts, updates, seen = [], [], set()
     for _, row in edited.iterrows():
-        values = {c: _clean(row.get(c)) for c in campos}
+        raw = {c: _clean(row.get(c)) for c in campos}
         rid = _clean(row.get("id"))
-        if rid is None and not (values["tarea"] or "").strip() and not values["responsable"] \
-                and values["fecha_limite"] is None:
+        if rid is None and not (raw["tarea"] or "").strip() \
+                and not any(raw[c] for c in TEXTOS) and raw["fecha_limite"] is None:
             continue  # fila nueva en blanco agregada sin querer
-        values["tarea"] = _validate(
-            values["tarea"], values["estado"] or "Pendiente", values["prioridad"] or "Media"
-        )
-        values["estado"] = values["estado"] or "Pendiente"
-        values["prioridad"] = values["prioridad"] or "Media"
-        values["responsable"] = (values["responsable"] or "").strip()
+        values = _validate(raw)
 
         if rid is None:
             inserts.append(values)
@@ -217,15 +279,18 @@ def apply_changes(
         if rid not in orig:
             continue  # id desconocido: no se toca
         before = {c: _clean(orig[rid][c]) for c in campos}
-        before["responsable"] = (before["responsable"] or "").strip()
+        for c in TEXTOS:
+            before[c] = (before[c] or "").strip()
         if before != values:
             updates.append((rid, values))
 
     deletes = [i for i in orig if i not in seen]
 
+    nuevas = []
     with engine.begin() as conn:
         for values in inserts:
-            conn.execute(insert(tasks).values(**values))
+            res = conn.execute(insert(tasks).values(**values))
+            nuevas.append({**values, "id": int(res.inserted_primary_key[0])})
         for rid, values in updates:
             conn.execute(
                 update(tasks)
@@ -235,7 +300,12 @@ def apply_changes(
         if deletes:
             conn.execute(delete(tasks).where(tasks.c.id.in_(deletes)))
 
-    return {"insertadas": len(inserts), "modificadas": len(updates), "eliminadas": len(deletes)}
+    return {
+        "insertadas": len(inserts),
+        "modificadas": len(updates),
+        "eliminadas": len(deletes),
+        "nuevas": nuevas,
+    }
 
 
 def check_connection(engine: Engine) -> None:

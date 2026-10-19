@@ -45,13 +45,15 @@ def test_apply_changes_insert_update_delete(engine):
     edited = edited[edited["tarea"] != "C"]  # borrar C
     edited.loc[edited["tarea"] == "A", "estado"] = "En Progreso"  # modificar A
     new = {c: None for c in db.COLUMNAS}
-    new.update(tarea="D", estado="Pendiente", prioridad="Baja", responsable="Luis")
+    new.update(tarea="D", estado="Pendiente", prioridad="Baja", responsable_ejecucion="Luis")
     import pandas as pd
 
     edited = pd.concat([edited, pd.DataFrame([new])], ignore_index=True)
 
     res = db.apply_changes(engine, original, edited)
+    nuevas = res.pop("nuevas")
     assert res == {"insertadas": 1, "modificadas": 1, "eliminadas": 1}
+    assert nuevas[0]["tarea"] == "D" and nuevas[0]["id"]
     out = db.load_tasks(engine).set_index("tarea")
     assert set(out.index) == {"A", "B", "D"}
     assert out.loc["A", "estado"] == "En Progreso"
@@ -75,7 +77,7 @@ def test_apply_changes_is_atomic(engine):
     edited = original.copy()
     edited.loc[0, "estado"] = "En Progreso"
     bad = {c: None for c in db.COLUMNAS}
-    bad.update(tarea="", estado="Pendiente", prioridad="Baja", responsable="x")
+    bad.update(tarea="", estado="Pendiente", prioridad="Baja", responsable_ejecucion="x")
     import pandas as pd
 
     edited = pd.concat([edited, pd.DataFrame([bad])], ignore_index=True)
@@ -94,3 +96,54 @@ def test_normalize_url():
 
 def test_no_schema_problems_on_fresh_table(engine):
     assert db.schema_problems(engine) == []
+
+
+def test_add_task_returns_id_and_new_fields(engine):
+    t = db.add_task(
+        engine, "Validar stock", responsable_ejecucion="Ana",
+        responsable_validacion=" Jefe@Empresa.com ", link_formulario="forms.gle/abc",
+    )
+    assert t["id"]
+    df = db.load_tasks(engine)
+    assert df.loc[0, "responsable_validacion"] == "jefe@empresa.com"
+    assert df.loc[0, "link_formulario"] == "https://forms.gle/abc"
+
+
+def test_email_invalido(engine):
+    with pytest.raises(ValueError):
+        db.add_task(engine, "x", responsable_validacion="no-es-mail")
+
+
+def test_migra_tabla_con_columna_responsable_vieja():
+    from sqlalchemy import text
+
+    eng = db.make_engine("sqlite:///:memory:")
+    with eng.begin() as c:
+        c.execute(text(
+            "CREATE TABLE tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, tarea TEXT NOT NULL, "
+            "estado TEXT NOT NULL DEFAULT 'Pendiente', prioridad TEXT NOT NULL DEFAULT 'Media', "
+            "responsable TEXT NOT NULL DEFAULT '', fecha_limite DATE, "
+            "creado_en DATETIME, actualizado_en DATETIME)"
+        ))
+        c.execute(text("INSERT INTO tasks (tarea, responsable) VALUES ('Vieja', 'Pedro')"))
+    db.ensure_schema(eng)
+    db.ensure_schema(eng)  # idempotente
+    assert db.schema_problems(eng) == []
+    df = db.load_tasks(eng)
+    assert df.loc[0, "responsable_ejecucion"] == "Pedro"
+    assert df.loc[0, "responsable_validacion"] == ""
+
+
+def test_mail_de_notificacion():
+    import notify
+
+    cfg = {"host": "smtp.x", "user": "bot@x.com", "password": "p"}
+    assert notify.smtp_configured(cfg) and not notify.smtp_configured({})
+    msg = notify.build_message(cfg, {
+        "tarea": "Cierre <mes>", "responsable_validacion": "jefe@x.com",
+        "responsable_ejecucion": "Ana", "prioridad": "Alta", "estado": "Pendiente",
+        "fecha_limite": date(2026, 11, 1), "link_formulario": "https://forms.gle/abc",
+    }, "https://tablero.app")
+    assert msg["To"] == "jefe@x.com"
+    html = msg.get_body("html").get_content()
+    assert "https://forms.gle/abc" in html and "&lt;mes&gt;" in html and "01/11/2026" in html
