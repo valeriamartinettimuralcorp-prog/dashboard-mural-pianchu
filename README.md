@@ -6,7 +6,8 @@ Tablero de tareas con **Streamlit** y **PostgreSQL (Supabase)**.
 - Alta de tareas desde la barra lateral con **responsable de ejecución**, **responsable de validación (mail)** y **link al formulario de Google** donde se ejecuta la tarea.
 - **Notificación por mail** al responsable de validación cuando se crea la tarea (desde la barra lateral o desde la tabla). Se puede reenviar desde el detalle de la tarea.
 - **Colores por estado**: 🔴 Pendiente, 🟠 En Progreso, 🟡 En Revisión, 🟢 Completado.
-- **Detalle de tarea** (botón 👁 en el Kanban) con acceso directo al formulario.
+- **Detalle de tarea** (botón 👁 en el Kanban o «Ver detalle» en la tabla) con acceso directo al formulario.
+- **Observaciones**: historial de notas del validador en el detalle de cada tarea (fecha, hora y autor; no se pisan). La tarjeta muestra la cantidad y la última nota; se exportan en la columna «Observaciones».
 - **Tabla editable**: editar, agregar y borrar filas; solo se escriben las diferencias (INSERT/UPDATE/DELETE por `id`), en una transacción.
 - **Kanban**: mover tareas entre estados con los botones ◀ ▶; marca las vencidas.
 - **Filtros**: búsqueda, responsable de ejecución, de validación, prioridad, solo vencidas, ocultar completadas.

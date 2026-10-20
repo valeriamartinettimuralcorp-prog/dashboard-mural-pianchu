@@ -27,6 +27,7 @@ ENCABEZADOS = {
     "responsable_validacion": "Responsable de validación (mail)",
     "link_formulario": "Link formulario",
     "fecha_limite": "Fecha límite (DD/MM/AAAA)",
+    "observaciones": "Observaciones",
 }
 CAMPOS = [c for c in ENCABEZADOS if c != "id"]
 
@@ -42,6 +43,9 @@ INSTRUCCIONES = [
     ("Link formulario", "No", "Link al formulario de Google donde se ejecuta la tarea.",
      "https://forms.gle/abc123"),
     ("Fecha límite (DD/MM/AAAA)", "No", "Fecha de Excel o texto DD/MM/AAAA.", "31/10/2026"),
+    ("Observaciones", "No", "Nota inicial para tareas nuevas (queda en el historial de observaciones). "
+     "Al exportar, muestra el historial completo; al actualizar por ID se ignora.",
+     "Falta el remito de la sucursal 3"),
 ]
 
 _ALIAS = {
@@ -63,6 +67,10 @@ _ALIAS = {
     "fecha_limite": [
         "fechalimite", "fechadevencimiento", "vencimiento", "vence", "fecha", "duedate",
         "deadline", "fechaentrega",
+    ],
+    "observaciones": [
+        "observaciones", "observacion", "notas", "nota", "comentarios", "comentario",
+        "notes", "comments", "obs",
     ],
 }
 ALIAS = {a: campo for campo, lista in _ALIAS.items() for a in lista}
@@ -169,7 +177,7 @@ def _hoja_tareas(wb: Workbook, filas: list[list]) -> None:
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = _AZUL
         c.alignment = Alignment(vertical="center", wrap_text=True)
-    anchos = [8, 40, 15, 12, 26, 32, 38, 16]
+    anchos = [8, 40, 15, 12, 26, 32, 38, 16, 60]
     for i, w in enumerate(anchos):
         ws.column_dimensions[chr(65 + i)].width = w
     ws.row_dimensions[1].height = 32
@@ -184,6 +192,7 @@ def _hoja_tareas(wb: Workbook, filas: list[list]) -> None:
     dv_pri.add(f"D2:D{ultima}")
     for r in range(2, ultima + 1):
         ws.cell(row=r, column=8).number_format = "DD/MM/YYYY"
+        ws.cell(row=r, column=9).alignment = Alignment(wrap_text=True, vertical="top")
 
 
 def _hoja_instrucciones(wb: Workbook) -> None:
@@ -213,7 +222,20 @@ def plantilla_xlsx() -> bytes:
     return buf.getvalue()
 
 
-def exportar_xlsx(df: pd.DataFrame) -> bytes:
+def historial_texto(obs: pd.DataFrame | None, task_id: int) -> str:
+    """Historial de observaciones de una tarea en texto (de la más vieja a la más nueva)."""
+    if obs is None or obs.empty:
+        return ""
+    sub = obs[obs["task_id"] == task_id].sort_values(["creado_en", "id"])
+    lineas = []
+    for _, o in sub.iterrows():
+        cuando = pd.Timestamp(o["creado_en"]).strftime("%d/%m/%Y %H:%M") if pd.notna(o["creado_en"]) else ""
+        autor = f" – {o['autor']}" if o["autor"] else ""
+        lineas.append(f"[{cuando}{autor}] {o['texto']}")
+    return "\n".join(lineas)
+
+
+def exportar_xlsx(df: pd.DataFrame, obs: pd.DataFrame | None = None) -> bytes:
     filas = []
     for _, r in df.iterrows():
         f = r.get("fecha_limite")
@@ -222,6 +244,7 @@ def exportar_xlsx(df: pd.DataFrame) -> bytes:
             r.get("responsable_ejecucion", ""), r.get("responsable_validacion", ""),
             r.get("link_formulario", ""),
             f if (f is not None and not pd.isna(f)) else None,
+            historial_texto(obs, int(r["id"])),
         ])
     wb = Workbook()
     _hoja_tareas(wb, filas)
@@ -231,8 +254,9 @@ def exportar_xlsx(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
-def exportar_csv(df: pd.DataFrame) -> bytes:
+def exportar_csv(df: pd.DataFrame, obs: pd.DataFrame | None = None) -> bytes:
     out = df[db.COLUMNAS].copy()
+    out["observaciones"] = out["id"].map(lambda i: historial_texto(obs, int(i)))
     out["fecha_limite"] = out["fecha_limite"].map(
         lambda f: f.strftime("%d/%m/%Y") if f is not None and not pd.isna(f) else ""
     )
@@ -297,6 +321,7 @@ def preparar(df_archivo: pd.DataFrame) -> dict:
                 "fecha_limite": _fecha(crudo.get("fecha_limite")),
             }
             valores = db._validate(valores)
+            valores["observaciones"] = _texto(crudo.get("observaciones"))
             rid = _texto(crudo.get("id"))
             valores["id"] = int(float(rid)) if rid else None
         except ValueError as ex:

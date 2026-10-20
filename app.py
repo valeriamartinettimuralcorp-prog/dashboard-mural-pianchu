@@ -1,5 +1,6 @@
 import hmac
 import os
+import re
 from datetime import date
 from html import escape
 
@@ -197,6 +198,67 @@ def ver_tarea(t: dict):
             notificar([t])
             st.rerun()
 
+    st.markdown("---")
+    seccion_observaciones(t)
+
+
+def _md(texto: str) -> str:
+    """Escapa caracteres de Markdown para mostrar el texto tal cual."""
+    return re.sub(r"([\\`*_{}\[\]<>()#+\-.!|~])", r"\\\1", str(texto)).replace("\n", "  \n")
+
+
+def _fmt_momento(v) -> str:
+    try:
+        return pd.Timestamp(v).strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return ""
+
+
+def seccion_observaciones(t: dict):
+    """Historial de notas del validador + alta de una nueva."""
+    tid = int(t["id"])
+    try:
+        obs = db.load_observaciones(engine, tid)
+    except Exception as ex:
+        st.error(f"No se pudieron leer las observaciones: {ex}")
+        return
+    st.markdown(f"#### 💬 Observaciones ({len(obs)})")
+
+    n = st.session_state.get(f"obs_n_{tid}", 0)
+    with st.form(f"obs_form_{tid}_{n}", border=True):
+        texto = st.text_area(
+            "Nueva observación",
+            placeholder="Ej.: Revisé el formulario, falta adjuntar el comprobante de la sucursal 3.",
+            height=90,
+        )
+        autor = st.text_input(
+            "Autor",
+            value=t.get("responsable_validacion") or "",
+            help="Por defecto, el responsable de validación de la tarea.",
+        )
+        if st.form_submit_button("➕ Agregar observación", type="primary"):
+            if not texto.strip():
+                st.warning("Escribí la observación antes de agregarla.")
+            else:
+                try:
+                    db.add_observacion(engine, tid, texto, autor)
+                    st.session_state[f"obs_n_{tid}"] = n + 1
+                    st.rerun(scope="fragment")
+                except Exception as ex:
+                    st.error(f"Error: {ex}")
+
+    if obs.empty:
+        st.caption("Todavía no hay observaciones. Agregá la primera a medida que validás la ejecución.")
+    for _, o in obs.iterrows():
+        with st.container(border=True):
+            c_txt, c_del = st.columns([12, 1])
+            autor_txt = f" · {_md(o['autor'])}" if o["autor"] else ""
+            c_txt.caption(f"🕒 {_fmt_momento(o['creado_en'])}{autor_txt}")
+            c_txt.markdown(_md(o["texto"]))
+            if c_del.button("🗑", key=f"del_obs_{int(o['id'])}", help="Borrar esta observación"):
+                db.delete_observacion(engine, int(o["id"]))
+                st.rerun(scope="fragment")
+
 
 # --------------------------------------------------------------------------
 # Encabezado
@@ -259,9 +321,18 @@ if submitted:
 # --------------------------------------------------------------------------
 try:
     df = db.load_tasks(engine)
+    obs_all = db.load_observaciones(engine)
 except Exception as e:
     st.error(f"No se pudieron leer las tareas: {e}")
     st.stop()
+
+n_obs = obs_all.groupby("task_id").size().to_dict() if not obs_all.empty else {}
+ultima_obs = (
+    obs_all.drop_duplicates("task_id").set_index("task_id")["texto"].to_dict()  # ya viene de la más nueva
+    if not obs_all.empty else {}
+)
+df["observaciones"] = df["id"].map(lambda i: n_obs.get(int(i), 0))
+df["ultima_observacion"] = df["id"].map(lambda i: ultima_obs.get(int(i), ""))
 
 hoy = date.today()
 df["vencida"] = df.apply(
@@ -327,6 +398,10 @@ with tab_kanban:
                             fecha = row["fecha_limite"].strftime("%d/%m/%Y")
                             linea += f" · {'🔴 Vencida ' if row['vencida'] else '📅 '}{fecha}"
                         st.caption(linea)
+                        if row["observaciones"]:
+                            ult = row["ultima_observacion"]
+                            ult = ult if len(ult) <= 70 else ult[:67] + "…"
+                            st.caption(f"💬 {row['observaciones']} · «{ult}»")
                         if row["link_formulario"]:
                             st.link_button("📝 Formulario", row["link_formulario"], width="stretch")
                         b1, b2, b3 = st.columns(3)
@@ -346,11 +421,23 @@ with tab_tabla:
     st.caption(
         "Editá celdas, agregá filas al final o borrá filas seleccionadas; "
         "después tocá **Guardar cambios**. Las tareas nuevas con mail de validación "
-        "envían la notificación al guardar."
+        "envían la notificación al guardar. Las observaciones se cargan desde el detalle de la tarea."
     )
+    if not fdf.empty:
+        d1, d2 = st.columns([5, 1])
+        opciones = {int(r["id"]): f"#{int(r['id'])} · {r['tarea']}" for _, r in fdf.iterrows()}
+        elegida = d1.selectbox(
+            "Ver detalle / observaciones de una tarea",
+            list(opciones),
+            format_func=opciones.get,
+            label_visibility="collapsed",
+        )
+        if d2.button("👁 Ver detalle", width="stretch"):
+            ver_tarea(fdf[fdf["id"] == elegida].iloc[0].to_dict())
     base = fdf[db.COLUMNAS].reset_index(drop=True)
     vista = base.copy()
     vista.insert(1, "color", vista["estado"].map(lambda e: COLORES.get(e, ("", "", ""))[2]))
+    vista["ultima_observacion"] = fdf["ultima_observacion"].reset_index(drop=True)
     edited = st.data_editor(
         vista,
         num_rows="dynamic",
@@ -358,7 +445,7 @@ with tab_tabla:
         hide_index=True,
         key="task_editor",
         column_order=["color", "id", "tarea", "estado", "prioridad", "responsable_ejecucion",
-                      "responsable_validacion", "fecha_limite", "link_formulario"],
+                      "responsable_validacion", "fecha_limite", "link_formulario", "ultima_observacion"],
         column_config={
             "color": st.column_config.TextColumn("", disabled=True, width="small"),
             "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
@@ -377,11 +464,15 @@ with tab_tabla:
             "link_formulario": st.column_config.LinkColumn(
                 "Formulario", help="Link del formulario de Google donde se ejecuta la tarea"
             ),
+            "ultima_observacion": st.column_config.TextColumn(
+                "Última observación", disabled=True,
+                help="Se agregan desde «👁 Ver detalle». Acá solo se muestra la más reciente.",
+            ),
         },
     )
     if st.button("💾 Guardar cambios", type="primary"):
         res = run(
-            lambda: db.apply_changes(engine, base, edited.drop(columns=["color"])),
+            lambda: db.apply_changes(engine, base, edited.drop(columns=["color", "ultima_observacion"])),
             lambda r: (
                 f"Guardado: {r['insertadas']} nuevas, {r['modificadas']} modificadas, "
                 f"{r['eliminadas']} eliminadas."
@@ -459,7 +550,7 @@ with tab_io:
     )
     e2.download_button(
         f"⬇️ Exportar {len(fdf)} tareas (Excel)",
-        data=io_tareas.exportar_xlsx(fdf),
+        data=io_tareas.exportar_xlsx(fdf, obs_all),
         file_name=f"tareas_{hoy:%Y%m%d}.xlsx",
         mime=XLSX,
         width="stretch",
@@ -468,7 +559,7 @@ with tab_io:
     )
     e3.download_button(
         f"⬇️ Exportar {len(fdf)} tareas (CSV)",
-        data=io_tareas.exportar_csv(fdf),
+        data=io_tareas.exportar_csv(fdf, obs_all),
         file_name=f"tareas_{hoy:%Y%m%d}.csv",
         mime="text/csv",
         width="stretch",

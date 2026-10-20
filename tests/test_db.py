@@ -147,3 +147,26 @@ def test_mail_de_notificacion():
     assert msg["To"] == "jefe@x.com"
     html = msg.get_body("html").get_content()
     assert "https://forms.gle/abc" in html and "&lt;mes&gt;" in html and "01/11/2026" in html
+
+
+def test_observaciones_historial(engine):
+    t = db.add_task(engine, "Validar caja", responsable_validacion="jefe@x.com")
+    db.add_observacion(engine, t["id"], "  Falta comprobante  ", "jefe@x.com")
+    db.add_observacion(engine, t["id"], "Comprobante recibido, OK", "jefe@x.com")
+    obs = db.load_observaciones(engine, t["id"])
+    assert list(obs["texto"]) == ["Comprobante recibido, OK", "Falta comprobante"]  # más nueva primero
+    assert db.contar_observaciones(engine) == {t["id"]: 2}
+    with pytest.raises(ValueError):
+        db.add_observacion(engine, t["id"], "   ")
+    with pytest.raises(ValueError):
+        db.add_observacion(engine, 9999, "x")
+    db.delete_observacion(engine, int(obs.loc[0, "id"]))
+    assert len(db.load_observaciones(engine, t["id"])) == 1
+
+
+def test_borrar_tarea_borra_sus_observaciones(engine):
+    t = db.add_task(engine, "A")
+    db.add_observacion(engine, t["id"], "nota")
+    original = db.load_tasks(engine)[db.COLUMNAS]
+    db.apply_changes(engine, original, original.iloc[0:0])
+    assert db.load_observaciones(engine).empty

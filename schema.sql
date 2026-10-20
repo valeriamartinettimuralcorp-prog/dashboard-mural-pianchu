@@ -19,6 +19,15 @@ CREATE TABLE IF NOT EXISTS tasks (
 -- Las columnas responsable_ejecucion / responsable_validacion / link_formulario
 -- las agrega la app sola al iniciar (renombra `responsable` si existe).
 
+CREATE TABLE IF NOT EXISTS observaciones (
+    id         BIGSERIAL PRIMARY KEY,
+    task_id    BIGINT    NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    autor      TEXT      NOT NULL DEFAULT '',
+    texto      TEXT      NOT NULL,
+    creado_en  TIMESTAMP DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_observaciones_task_id ON observaciones (task_id);
+
 -- ============ B) Migración de la tabla vieja ============
 -- Ejecutar UNA vez (en el SQL Editor de Supabase) si la app avisa que la tabla
 -- `tasks` tiene el esquema anterior. Hacer un backup/export antes.

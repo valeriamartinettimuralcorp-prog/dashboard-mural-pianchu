@@ -14,6 +14,7 @@ from sqlalchemy import (
     BigInteger,
     Column,
     Date,
+    ForeignKey,
     DateTime,
     Integer,
     MetaData,
@@ -67,6 +68,28 @@ tasks = Table(
     Column("fecha_limite", Date, nullable=True),
     Column("creado_en", DateTime, server_default=func.now()),
     Column("actualizado_en", DateTime, server_default=func.now()),
+)
+
+# Historial de observaciones de cada tarea (notas del validador).
+observaciones = Table(
+    "observaciones",
+    metadata,
+    Column(
+        "id",
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    Column(
+        "task_id",
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("autor", Text, nullable=False, server_default=""),
+    Column("texto", Text, nullable=False),
+    Column("creado_en", DateTime, server_default=func.now()),
 )
 
 
@@ -124,6 +147,8 @@ def schema_problems(engine: Engine) -> list[str]:
     if not insp.has_table("tasks"):
         return []
     problems = []
+    if not insp.has_table("observaciones"):
+        problems.append("Falta la tabla `observaciones`.")
     if not insp.get_pk_constraint("tasks").get("constrained_columns"):
         problems.append("`tasks` no tiene clave primaria en `id`.")
     cols = {c["name"]: c for c in insp.get_columns("tasks")}
@@ -298,6 +323,7 @@ def apply_changes(
                 .values(**values, actualizado_en=datetime.now())
             )
         if deletes:
+            conn.execute(delete(observaciones).where(observaciones.c.task_id.in_(deletes)))
             conn.execute(delete(tasks).where(tasks.c.id.in_(deletes)))
 
     return {
@@ -331,8 +357,56 @@ def import_tasks(engine: Engine, filas: list[dict], actualizar_por_id: bool = Fa
                 actualizadas += 1
             else:
                 res = conn.execute(insert(tasks).values(**values))
-                nuevas.append({**values, "id": int(res.inserted_primary_key[0])})
+                tid = int(res.inserted_primary_key[0])
+                nota = (f.get("observaciones") or "").strip()
+                if nota:
+                    conn.execute(insert(observaciones).values(
+                        task_id=tid, autor="Importación", texto=nota,
+                        creado_en=datetime.now().replace(microsecond=0),
+                    ))
+                nuevas.append({**values, "id": tid})
     return {"insertadas": len(nuevas), "actualizadas": actualizadas, "nuevas": nuevas}
+
+
+# --------------------------------------------------------------------------
+# Observaciones
+# --------------------------------------------------------------------------
+def add_observacion(engine: Engine, task_id: int, texto: str, autor: str = "") -> dict:
+    texto = (texto or "").strip()
+    if not texto:
+        raise ValueError("La observación está vacía.")
+    autor = (autor or "").strip()
+    ahora = datetime.now().replace(microsecond=0)
+    with engine.begin() as conn:
+        existe = conn.execute(select(tasks.c.id).where(tasks.c.id == int(task_id))).first()
+        if not existe:
+            raise ValueError("La tarea ya no existe.")
+        res = conn.execute(
+            insert(observaciones).values(task_id=int(task_id), autor=autor, texto=texto, creado_en=ahora)
+        )
+        conn.execute(update(tasks).where(tasks.c.id == int(task_id)).values(actualizado_en=ahora))
+    return {"id": int(res.inserted_primary_key[0]), "task_id": int(task_id),
+            "autor": autor, "texto": texto, "creado_en": ahora}
+
+
+def delete_observacion(engine: Engine, obs_id: int) -> None:
+    with engine.begin() as conn:
+        conn.execute(delete(observaciones).where(observaciones.c.id == int(obs_id)))
+
+
+def load_observaciones(engine: Engine, task_id: Optional[int] = None) -> pd.DataFrame:
+    """Observaciones de una tarea (o de todas), de la más nueva a la más vieja."""
+    q = select(observaciones).order_by(observaciones.c.creado_en.desc(), observaciones.c.id.desc())
+    if task_id is not None:
+        q = q.where(observaciones.c.task_id == int(task_id))
+    with engine.connect() as conn:
+        return pd.read_sql(q, conn)
+
+
+def contar_observaciones(engine: Engine) -> dict[int, int]:
+    q = select(observaciones.c.task_id, func.count()).group_by(observaciones.c.task_id)
+    with engine.connect() as conn:
+        return {int(t): int(n) for t, n in conn.execute(q)}
 
 
 def check_connection(engine: Engine) -> None:

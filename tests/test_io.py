@@ -55,11 +55,12 @@ def test_csv_de_otro_tablero_con_encabezados_y_valores_distintos():
         "Estado raro;Congelado;Media;;;;\n"
     ).encode("latin-1")
     prep = io_tareas.preparar(io_tareas.leer_archivo("otro.csv", csv))
-    assert prep["ignoradas"] == ["Notas"]
+    assert prep["ignoradas"] == []  # «Notas» se toma como Observaciones
     assert [v["tarea"] for v in prep["validas"]] == ["Cargar remitos", "Cerrar caja"]
     v0, v1 = prep["validas"]
     assert (v0["estado"], v0["prioridad"], v0["responsable_ejecucion"]) == ("En Progreso", "Alta", "Pedro")
     assert v0["responsable_validacion"] == "jefe@x.com" and v0["fecha_limite"] == date(2026, 10, 31)
+    assert v0["observaciones"] == "algo" and v1["observaciones"] == ""
     assert (v1["estado"], v1["prioridad"], v1["fecha_limite"]) == ("Completado", "Media", date(2026, 11, 2))
     assert [e["Fila"] for e in prep["errores"]] == [5, 6, 7]
 
@@ -71,3 +72,19 @@ def test_falta_columna_tarea():
 
 def test_fecha_serial_excel():
     assert io_tareas._fecha(46326) == date(2026, 10, 31)
+
+
+def test_observaciones_en_importacion_y_exportacion(engine):
+    csv = "Tarea;Observaciones\nA;Nota inicial\nB;\n".encode()
+    prep = io_tareas.preparar(io_tareas.leer_archivo("x.csv", csv))
+    res = db.import_tasks(engine, prep["validas"])
+    ids = {t["tarea"]: t["id"] for t in res["nuevas"]}
+    obs = db.load_observaciones(engine)
+    assert list(obs["texto"]) == ["Nota inicial"] and obs.loc[0, "task_id"] == ids["A"]
+    db.add_observacion(engine, ids["A"], "Validado OK", "jefe@x.com")
+
+    archivo = io_tareas.exportar_xlsx(db.load_tasks(engine), db.load_observaciones(engine))
+    hoja = pd.read_excel(io.BytesIO(archivo), sheet_name="Tareas")
+    texto = hoja.loc[hoja["Tarea"] == "A", "Observaciones"].iloc[0]
+    assert "Importación] Nota inicial" in texto and "jefe@x.com] Validado OK" in texto
+    assert texto.index("Nota inicial") < texto.index("Validado OK")
